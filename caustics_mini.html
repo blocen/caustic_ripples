@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Pool Caustics</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #04323b; }
+  #gl { display: block; width: 100vw; height: 100vh; }
+
+  #panel {
+    position: fixed; left: 16px; bottom: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 14px 16px; border-radius: 14px;
+    background: rgba(4, 30, 36, 0.45);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    font: 13px/1.3 -apple-system, system-ui, sans-serif;
+    color: #eafdff; user-select: none; max-width: min(320px, 90vw);
+  }
+  #panel.hidden { opacity: 0; pointer-events: none; transform: translateY(8px); }
+  #panel { transition: opacity .25s, transform .25s; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .row label { flex: 0 0 78px; opacity: .85; }
+  input[type=range] { flex: 1; accent-color: #6fe9ff; }
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatch {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.5); cursor: pointer;
+  }
+  .swatch.active { border-color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,.35); }
+  input[type=color] { width: 34px; height: 26px; border: none; background: none; cursor: pointer; }
+  .hint { opacity: .55; font-size: 11px; }
+  button.ghost {
+    align-self: flex-start; background: rgba(255,255,255,.1); color: inherit;
+    border: 1px solid rgba(255,255,255,.18); border-radius: 8px;
+    padding: 5px 10px; cursor: pointer; font: inherit;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="panel">
+  <div class="row" style="font-weight:600; flex:initial;">Pool Caustics
+    <span class="hint" style="margin-left:auto;">press&nbsp;H&nbsp;to&nbsp;hide</span>
+  </div>
+  <div class="row">
+    <label>Water color</label>
+    <input type="color" id="picker" value="#1f97a8" />
+    <div class="swatches" id="swatches"></div>
+  </div>
+  <div class="row"><label>Speed</label><input type="range" id="speed" min="0" max="2" step="0.01" value="0.5" /></div>
+  <div class="row"><label>Caustics</label><input type="range" id="intensity" min="0" max="2" step="0.01" value="1" /></div>
+  <div class="row"><label>Rainbow</label><input type="range" id="chroma" min="0" max="3" step="0.01" value="1" /></div>
+  <div class="row"><label>Tile size</label><input type="range" id="tile" min="2" max="14" step="0.1" value="6.5" /></div>
+  <div class="row"><label>Ripple</label><input type="range" id="distort" min="0" max="2" step="0.01" value="1" /></div>
+</div>
+
+<script id="vert" type="x-shader/x-vertex">
+attribute vec2 p;
+void main() { gl_Position = vec4(p, 0.0, 1.0); }
+</script>
+
+<script id="frag" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2  u_res;
+uniform float u_time;
+uniform vec3  u_color;      // base water color (linear-ish)
+uniform float u_intensity;  // caustics brightness
+uniform float u_chroma;     // chromatic aberration amount
+uniform float u_tile;       // tiles across the view
+uniform float u_distort;    // ripple/refraction strength
+
+// hash + value noise
+float hash(vec2 p){ p = fract(p*vec2(123.34, 456.21)); p += dot(p, p+45.32); return fract(p.x*p.y); }
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*(3.0-2.0*f);
+  return mix(mix(hash(i+vec2(0,0)), hash(i+vec2(1,0)), u.x),
+             mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), u.x), u.y);
+}
+float fbm(vec2 p){
+  float s = 0.0, a = 0.5;
+  for(int i=0;i<5;i++){ s += a*noise(p); p *= 2.02; a *= 0.5; }
+  return s;
+}
+
+// Voronoi-style caustic web: distance to nearest cell point -> bright thin ridges
+float caustic(vec2 uv, float t){
+  vec2 g = floor(uv); vec2 f = fract(uv);
+  float md = 1.0;
+  for(int y=-1;y<=1;y++){
+    for(int x=-1;x<=1;x++){
+      vec2 o = vec2(float(x), float(y));
+      vec2 r = hash(g+o) + 0.5*vec2(hash(g+o+11.0), hash(g+o+27.0));
+      r = 0.5 + 0.45*sin(t + 6.2831*r);          // animate cell centers
+      float d = length(o + r - f);
+      md = min(md, d);
+    }
+  }
+  // thin bright lines where cells meet (high-contrast caustic look)
+  return pow(1.0 - smoothstep(0.0, 0.55, md), 3.0);
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  float t = u_time;
+
+  // slow refractive ripple that warps everything beneath the surface
+  vec2 flow = vec2(
+    fbm(uv*2.5 + vec2(0.0, t*0.15)),
+    fbm(uv*2.5 + vec2(5.2, -t*0.12))
+  ) - 0.5;
+  vec2 wuv = uv + flow * 0.18 * u_distort;
+
+  // --- tiled pool floor with distorted grout lines ---
+  vec2 tuv = wuv * u_tile;
+  vec2 cell = abs(fract(tuv) - 0.5);
+  float line = max(cell.x, cell.y);
+  float wobble = 0.06 * fbm(tuv*1.5 + t*0.1);     // grout follows the water
+  float grout = smoothstep(0.46 + wobble, 0.5 + wobble, line);
+  // subtle marble within each tile
+  float marble = fbm(tuv*3.0 + 10.0);
+
+  // --- caustic light webs (two layers, different scale & drift) ---
+  float c1 = caustic(wuv*6.0 + vec2(t*0.20, t*0.05), t*1.1);
+  float c2 = caustic(wuv*10.0 - vec2(t*0.10, t*0.18), t*0.8);
+  float c  = (c1*0.7 + c2*0.5) * u_intensity;
+
+  // depth shading from the big ripple
+  float depth = 0.55 + 0.45*fbm(uv*1.5 - t*0.05);
+
+  // base water color, shaded by depth + marble
+  vec3 base = u_color * (0.55 + 0.5*depth) + marble*0.06;
+
+  // caustics add bright cyan-white light
+  vec3 lit = base + vec3(0.55, 0.95, 1.0) * c;
+
+  // dark grout lines carved in
+  lit *= mix(0.35, 1.0, grout);
+
+  // --- chromatic aberration / rainbow fringing on the caustic edges ---
+  float edge = abs(c1 - caustic(wuv*6.0 + vec2(t*0.20, t*0.05) + 0.02, t*1.1));
+  float disp = (length(flow) + edge) * u_chroma;
+  vec3 rainbow = 0.5 + 0.5*cos(6.2831*(disp + vec3(0.0, 0.33, 0.67)) + t);
+  lit += rainbow * c * 0.35 * u_chroma;
+
+  // surface sparkle highlights
+  float spark = pow(max(c1, c2), 6.0);
+  lit += spark * 0.6;
+
+  // vignette
+  lit *= 1.0 - 0.25*dot(uv, uv);
+
+  // gentle tonemap + gamma
+  lit = lit / (1.0 + lit*0.4);
+  lit = pow(clamp(lit, 0.0, 1.0), vec3(0.85));
+  gl_FragColor = vec4(lit, 1.0);
+}
+</script>
+
+<script>
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl", { antialias: true, preserveDrawingBuffer: false });
+if (!gl) { document.body.innerHTML = "<p style='color:#fff;padding:2rem;font:16px sans-serif'>WebGL not available in this browser.</p>"; throw new Error("no webgl"); }
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, document.getElementById("vert").textContent));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById("frag").textContent));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, "p");
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+const U = name => gl.getUniformLocation(prog, name);
+const u = {
+  res: U("u_res"), time: U("u_time"), color: U("u_color"),
+  intensity: U("u_intensity"), chroma: U("u_chroma"),
+  tile: U("u_tile"), distort: U("u_distort"),
+};
+
+// ---- controls ----
+const els = {
+  picker: document.getElementById("picker"),
+  speed: document.getElementById("speed"),
+  intensity: document.getElementById("intensity"),
+  chroma: document.getElementById("chroma"),
+  tile: document.getElementById("tile"),
+  distort: document.getElementById("distort"),
+};
+
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
+}
+
+const presets = ["#1f97a8", "#0e6e7a", "#1bb39a", "#2e6fb0", "#0d4f7a", "#157a8c", "#3aa0c9", "#0a3d4a"];
+const sw = document.getElementById("swatches");
+function setActive(hex) {
+  [...sw.children].forEach(c => c.classList.toggle("active", c.dataset.hex.toLowerCase() === hex.toLowerCase()));
+}
+presets.forEach(hex => {
+  const d = document.createElement("div");
+  d.className = "swatch"; d.style.background = hex; d.dataset.hex = hex;
+  d.onclick = () => { els.picker.value = hex; setActive(hex); };
+  sw.appendChild(d);
+});
+setActive(els.picker.value);
+els.picker.addEventListener("input", () => setActive(els.picker.value));
+
+// hide panel with H
+addEventListener("keydown", e => {
+  if (e.key === "h" || e.key === "H") document.getElementById("panel").classList.toggle("hidden");
+});
+
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(innerWidth * dpr);
+  canvas.height = Math.floor(innerHeight * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+addEventListener("resize", resize);
+resize();
+
+let t = 0, last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  t += dt * parseFloat(els.speed.value);
+
+  gl.uniform2f(u.res, canvas.width, canvas.height);
+  gl.uniform1f(u.time, t);
+  gl.uniform3fv(u.color, hexToRgb(els.picker.value));
+  gl.uniform1f(u.intensity, parseFloat(els.intensity.value));
+  gl.uniform1f(u.chroma, parseFloat(els.chroma.value));
+  gl.uniform1f(u.tile, parseFloat(els.tile.value));
+  gl.uniform1f(u.distort, parseFloat(els.distort.value));
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
