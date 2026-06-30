@@ -10,6 +10,7 @@
 	// "forwardPorts": [],
 	// Use 'postCreateCommand' to run commands after the container is created.
 	"postCreateCommand": "echo 'postCreateCommand: '; uname -a",
+	"updateContentCommand": "mkdir -p ~/.claude/commands && cp .devcontainer/commit-message.md ~/.claude/commands/commit-message.md",
 	// Configure tool-specific properties.
 	"customizations": {
 		"vscode": {
